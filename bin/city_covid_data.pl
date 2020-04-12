@@ -34,8 +34,6 @@ use Chart::Plotly::Trace::Histogram;
 use HTML::Show;
 use Chart::Plotly;
 use Chart::Plotly::Trace::Histogram;
-
-# use Types::URI qw/Uri/;
 use Capture::Tiny qw/capture/;
 use LWP::Simple;
 use Text::CSV_XS;
@@ -73,7 +71,6 @@ option create_new_zcta_db => (
     doc =>
       q/Create a new NYC Zip Cumulative Test 'A' JSON db for todays result/,
 );
-
 #-------------------------------------------------------------------------------
 # Attributes
 #-------------------------------------------------------------------------------
