@@ -13,9 +13,7 @@ use Types::Path::Tiny qw/Path AbsPath/;
 use File::Serialize qw/serialize_file deserialize_file/;
 use Carp;
 use namespace::clean;
-
 my $DEFAULT_DB_NAME = "zip_db.json";
-
 #-------------------------------------------------------------------------------
 # Attributes
 #-------------------------------------------------------------------------------
@@ -39,7 +37,7 @@ has zip_db_json_file => (
 );
 
 # Database data structure
-has zip_hash => (
+has zip_db_hash => (
     is => 'lazy',
     isa =>
       sub { die "'zips_hash' must be a HASH" unless ( ref( $_[0] ) eq 'HASH' ) }
@@ -93,7 +91,7 @@ sub get_raw_zip_data {
 
 sub read_the_db {
     my $self = shift;
-    return $self->zip_hash;
+    return $self->zip_db_hash;
 }
 
 sub get_zip_details {
@@ -107,8 +105,8 @@ sub get_zip_details {
             warn "Zip, <$zip> looks invalid!";
             next;
         };
-        push @details, { $zip => $self->zip_hash->{$zip} }
-          if $self->zip_hash->{$zip};
+        push @details, { $zip => $self->zip_db_hash->{$zip} }
+          if $self->zip_db_hash->{$zip};
     }
     return \@details;
 }
@@ -118,7 +116,7 @@ sub get_zip_codes_matching_details {
     Carp::confess "'get_zip_codes_matching_details' requires a search string!"
       unless ( defined $search_str );
     my @zip_codes;
-    while ( my ( $zip, $zip_detail ) = each %{ $self->zip_hash } ) {
+    while ( my ( $zip, $zip_detail ) = each %{ $self->zip_db_hash } ) {
         push @zip_codes, { $zip => $zip_detail }
           if ( ( index( lc $zip_detail->{city}, $search_str ) > -1 )
             || ( index( lc $zip_detail->{district}, $search_str ) > -1 )
