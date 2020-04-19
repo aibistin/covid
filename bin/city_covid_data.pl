@@ -7,10 +7,6 @@
 #
 #  DESCRIPTION:
 #
-#      OPTIONS: ---
-# REQUIREMENTS: ---
-#         BUGS: ---
-#        NOTES: ---
 #       AUTHOR: Austin Kenny (AK), aibistin.cionnaith@gmail.com
 # ORGANIZATION: Me
 #      VERSION: 1.0
@@ -26,29 +22,30 @@ use Moo;
 use MooX::Options;
 use Path::Tiny qw/path/;
 use Data::Dump qw/dump/;
-use List::Util qw/any/;
-use Types::Path::Tiny qw/Path AbsPath/;
+use Types::Path::Tiny qw/Path/;
 use File::Serialize qw/serialize_file deserialize_file/;
 use Time::Piece;
-use Chart::Plotly::Trace::Histogram;
-use HTML::Show;
 use Chart::Plotly;
-use Chart::Plotly::Trace::Histogram;
-use Capture::Tiny qw/capture/;
-use LWP::Simple;
+use Chart::Plotly::Trace::Bar;
+use Chart::Plotly::Plot;
+# use HTML::Show;
+use LWP::Simple qw/get/;
 use Text::CSV_XS;
 use FindBin qw/$Bin/;
+
 use lib "$Bin/../lib";
 use ZipDb;
 
 #-------------------------------------------------------------------------------
-#
+#  Constants
 #-------------------------------------------------------------------------------
 my $RAW_ZCTA_DATA_LINK =
 q{https://raw.githubusercontent.com/nychealth/coronavirus-data/master/tests-by-zcta.csv};
 my $NA_ZIP            = '88888';
-my $START_DATE        = '20200401';         # April 1, the perfect starting date
 my $ALL_ZCTA_DATA_CSV = 'all_zcta_data.csv';
+my $DB_DIR            = "$Bin/../db";
+my $VIEW_NAME         = q/all_zcta_view/;
+my $THIS_SCRIPT       = path($0)->basename;
 
 #-------------------------------------------------------------------------------
 # Options
@@ -66,6 +63,20 @@ option create_new_zcta_db => (
       q/Create a new NYC Zip Cumulative Test 'A' JSON db for todays result/,
 );
 
+option show_zip_stats => (
+    is        => 'ro',
+    format    => 's@',
+    autosplit => ',',
+    default   => sub { [] },
+    short     => 'zip_stats',
+    doc       => q/Get the available statistics of a given zip code or codes/,
+    long_doc  => qq{
+        Get the available statistics of a given zip code
+        $THIS_SCRIPT --zip_stats 11379,11104
+        # Will create a HTML Chart
+    },
+);
+
 option verbose => (
     is    => 'ro',
     doc   => 'Print details',
@@ -75,6 +86,13 @@ option verbose => (
 #-------------------------------------------------------------------------------
 # Attributes
 #-------------------------------------------------------------------------------
+has db_dir => (
+    is      => 'ro',
+    isa     => Path,
+    coerce  => 1,
+    default => $DB_DIR,
+);
+
 # ZCTA = Zip Cumulative Test something or other
 has zcta_github_link => (
     is      => 'ro',
@@ -130,14 +148,31 @@ has all_tests_by_zcta_data => (
     }
 );
 
-has zip_hash => (
+has zip_db => (
     is => 'lazy',
     isa =>
-      sub { die "'zip_hash' must be a HASH" unless ( ref( $_[0] ) eq 'HASH' ) },
+      sub { die "'zip_db' must be a ZipDb" unless ( ref( $_[0] ) eq 'ZipDb' ) },
     builder => sub {
-        my $zip_db = ZipDb->new( db_dir => "$Bin/../db" );
-        return $zip_db->zip_db_hash;
+        return ZipDb->new( db_dir => $_[0]->db_dir );
     }
+);
+
+has date_to_str_func => (
+    is  => 'lazy',
+    isa => sub {
+        die "'date_to_str_func' must be a SUB"
+          unless ( ref( $_[0] ) eq 'CODE' );
+    },
+    builder => sub {
+        my %cache;
+        $cache{20200401} = '2020-04-03';    # Fudge as data from Apr 1 to 3
+        return sub {
+            my $date = shift;
+            return $cache{$date} if $cache{$date};
+            my ( $y, $m, $d ) = ( $date =~ /(\d{4})(\d{2})(\d{2})/ );
+            return $cache{$date} = "$y-$m-$d";
+        };
+    },
 );
 
 #===============================================================================
@@ -150,11 +185,8 @@ sub run {
     $self->create_zcta_view                 if $self->create_new_zcta_db;
 
     $self->write_latest_zcta_to_csv if $self->write_zcta_to_csv;
-    my $histogram =
-      Chart::Plotly::Trace::Histogram->new(
-        x => [ map { int( 10 * rand() ) } ( 1 .. 500 ) ] );
-
-  # HTML::Show::show( Chart::Plotly::render_full_html( data => [$histogram] ) );
+    $self->show_stats_for_zips( $self->show_zip_stats )
+      if ( @{ $self->show_zip_stats } );
 
     # dump $covid_data;
 
@@ -184,15 +216,16 @@ sub write_latest_zcta_to_csv {
         sort { $b->{positive} <=> $a->{positive} || $a->{zip} <=> $b->{zip} }
         @{ $self->tests_by_zcta_today } )
     {
-        my $location_rec = $self->zip_hash->{ $one_day_zip_rec->{zip} }
+        my $location_rec =
+          $self->zip_db->zip_db_hash->{ $one_day_zip_rec->{zip} }
           || _get_filler_location_rec( $one_day_zip_rec->{zip} );
-        $self->zip_hash->{ $one_day_zip_rec->{zip} } ||= $location_rec;
+        $self->zip_db->zip_db_hash->{ $one_day_zip_rec->{zip} } ||=
+          $location_rec;
         my %csv_rec = ( %$one_day_zip_rec, %$location_rec );
         $csv->print( $z_fh, [ @csv_rec{@col_names} ] );
     }
     close($z_fh) or warn "Failed to close $zcta_file";
     say "Created a new $zcta_file";
-    `notepad++ "$zcta_file"`;
 }
 
 sub create_zcta_view {
@@ -203,17 +236,18 @@ sub create_zcta_view {
         my %day_view;
         for my $test_rec ( sort { $a->{zip} <=> $b->{zip} } @{$one_day_tests} )
         {
-            my $location_rec = $self->zip_hash->{ $test_rec->{zip} }
+            my $location_rec = $self->zip_db->zip_db_hash->{ $test_rec->{zip} }
               || _get_filler_location_rec( $test_rec->{zip} );
-            $self->zip_hash->{ $test_rec->{zip} } ||= $location_rec;
+            $self->zip_db->zip_db_hash->{ $test_rec->{zip} } ||= $location_rec;
             $day_view{ $test_rec->{zip} } = { %$test_rec, %$location_rec };
         }
         push @view, \%day_view;
     }
-    my $view_file = $self->get_view_file('all_zcta_view');
+    my $view_file = $self->get_view_file($VIEW_NAME);
     serialize_file $view_file => \@view;
     say "Created a new $view_file";
-    `notepad++ "$view_file"`;
+
+    # `notepad++ "$view_file"`;
 }
 
 sub get_view_file {
@@ -223,6 +257,12 @@ sub get_view_file {
     my $view_file = $views_dir->child( $view_file_name . '.json' );
     $view_file->mkpath unless ( -f $view_file );
     return $view_file;
+}
+
+sub read_view {
+    my $self      = shift;
+    my $view_file = $self->get_view_file($VIEW_NAME);
+    deserialize_file $view_file;
 }
 
 sub get_todays_csv_file {
@@ -250,6 +290,108 @@ sub get_raw_covid_data_by_zip {
       ;    # Dont need that header
     say "Got @{[ scalar @data ]} lines of covid data. Thanks Mr. Mayor";
     return \@data;
+}
+
+sub show_stats_for_zips {
+    my ( $self, $zip_codes ) = @_;
+    my $max_zip = '11368';    # Corona
+    Carp::confess "'show_stats_for_zips' requires some zip codes!" unless ( defined $zip_codes );
+
+    my @chart_names = ref($zip_codes) eq 'ARRAY' ? @{$zip_codes} : ($zip_codes);
+    my $date_conv_func   = $self->date_to_str_func();
+    my $stats_cache_func = _get_zip_chart_stats_cache_func();
+
+    my @charts;
+    for my $zip_code (@chart_names) {
+        my $zip_code_stats = $stats_cache_func->( $self, $zip_code );
+        my $chart = Chart::Plotly::Trace::Bar->new(
+            x => [
+                map { $date_conv_func->($_) }
+                  @{ $zip_code_stats->{dates} || [] }
+            ],
+            y => [ @{ $zip_code_stats->{positive} || [] } ],
+            name => $self->city_district($zip_code),
+            text => $zip_code,
+            # text => [ @{ $zip_code_stats->{positive} || [] } ],
+            # textposition => 'inside',
+        );
+        push @charts, $chart;
+    }
+
+    # say "STATS: " . ( dump \@positive_stats );
+
+    say "BARS: " . ( dump \@charts );
+
+    my $bar_chart = Chart::Plotly::Plot->new(
+        traces => [@charts],
+        layout => { barmode => 'group' }
+    );
+
+    Chart::Plotly::show_plot($bar_chart);
+}
+
+sub city_district {
+    my ( $self, $zip_code ) = @_;
+    my $borough = $self->zip_db->zip_db_hash->{$zip_code}{borough};
+    my $city    = $self->zip_db->zip_db_hash->{$zip_code}{city};
+    return $city . ', ' . $self->zip_db->zip_db_hash->{$zip_code}{district} if ( $borough eq 'Queens' );
+    $city = 'Manhattan' if ( $city eq 'New York' );
+    return $self->zip_db->zip_db_hash->{$zip_code}{district} . ', ' . $city;
+}
+
+sub get_zip_details {
+    my ( $self, $zip_codes ) = @_;
+    Carp::confess "'get_zip_details' requires some zip codes!"
+      unless ( defined $zip_codes );
+    my @zip_codes = ref($zip_codes) eq 'ARRAY' ? @{$zip_codes} : ($zip_codes);
+    my @details;
+    for my $zip (@zip_codes) {
+        ( $zip !~ /\A\d{5}\z/ ) && do {
+            warn "Zip, <$zip> looks invalid!";
+            next;
+        };
+        push @details, { $zip => $self->zip_db_hash->{$zip} }
+          if $self->zip_db_hash->{$zip};
+    }
+    return \@details;
+}
+
+sub _get_zip_chart_stats_cache_func {
+    my %zip_stat_cache;
+
+    return sub {
+        my ( $self, $the_zip ) = @_;
+        return $zip_stat_cache{$the_zip} if $zip_stat_cache{$the_zip};
+        my $zip_all_stats = $self->get_stats_for_zip($the_zip);
+        $zip_stat_cache{$the_zip}{all_stats} = $zip_all_stats;
+
+        for my $stat ( sort { $a->{yyyymmdd} <=> $b->{yyyymmdd} }
+            @{$zip_all_stats} )
+        {
+            push @{ $zip_stat_cache{$the_zip}{dates} },    $stat->{yyyymmdd};
+            push @{ $zip_stat_cache{$the_zip}{positive} }, $stat->{positive};
+            push @{ $zip_stat_cache{$the_zip}{total_tested} },
+              $stat->{total_tested};
+            push
+              @{ $zip_stat_cache{$the_zip}{cumulative_percent_of_those_tested}
+              },
+              $stat->{cumulative_percent_of_those_tested} || 0;
+        }
+        return $zip_stat_cache{$the_zip};
+    };
+}
+
+sub get_stats_for_zip {
+    my ( $self, $the_zip ) = @_;
+    my @zip_stats;
+    for my $one_day_rec ( @{ $self->read_view } ) {
+        for my $zip ( keys %{$one_day_rec} ) {
+            next unless ( $zip eq $the_zip );
+            push @zip_stats, $one_day_rec->{$zip};
+            last;
+        }
+    }
+    return \@zip_stats;
 }
 
 #-------------------------------------------------------------------------------
