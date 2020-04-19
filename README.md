@@ -1,6 +1,6 @@
 # covid
 
-## Some scripts for analyzing New York City Covid-19 test results. 
+## Perl scripts for analyzing New York City Covid-19 test results. 
 
 ```shell
 USAGE: city_covid_data.pl [-h] [long options ...]
@@ -25,4 +25,4 @@ perl bin\city_covid_data.pl --show_zip_stats 11368,10467,11373,11219
 
 This will display the positive test results for the zip codes, 11368,10467,11373,11219, on a HTML file usint the Plotly JavaScript charting library. 
 
-### [For more details you can also read](http://www.aibistin.com/?p=727 "My Blog")
+[For more details you can also read](http://www.aibistin.com/?p=727 "My Blog")
